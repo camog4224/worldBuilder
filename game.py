@@ -25,21 +25,22 @@ def get_archived_files_list():
     return [f for f in os.listdir(ARCHIVE_DIR) if f.endswith(".md") or f.endswith(".txt")]
 
 def initialize_game():
-    """Initializes files and prints the exact narrative text from your last play session."""
+    """Initializes files and boots up your last session's text response verbatim."""
     if not os.path.exists(LORE_FILE):
         initial_lore = (
-            "# CURRENT CONTEXT\n"
+            "CURRENT CONTEXT:\n"
             "- Location: Starting Outpost\n"
             "- Time: Day 1, Dawn\n"
             "- Active Items: [Iron Knife]\n\n"
-            "# ACTIVE TIMELINE\n"
+            "ACTIVE TIMELINE:\n"
             "- You woke up at the edge of the world with no memory.\n"
         )
         write_file_content(LORE_FILE, initial_lore)
+        
+    if not os.path.exists(LAST_RESPONSE_FILE):
         initial_story = "You wake up at the edge of the world with no memory. Cold air cuts through your clothes, and an iron knife rests on the ground beside you."
         write_file_content(LAST_RESPONSE_FILE, initial_story)
 
-    # Load and print the exact last narrative response
     last_story = load_file_content(LAST_RESPONSE_FILE)
     if last_story:
         print("\n" + "📖" * 25)
@@ -49,26 +50,6 @@ def initialize_game():
         print("\n" + "="*50)
     
     print("\nClean Narrative Engine Active. Make any move you wish. Type 'exit' to save and quit.")
-
-def clean_and_extract_story(full_text):
-    """Isolates narrative text and prevents markdown data blocks from printing to screen."""
-    match = re.search(r"```markdown\s*(.*?)\s*```", full_text, re.DOTALL | re.IGNORECASE)
-    if not match:
-        match = re.search(r"```\s*(.*?)\s*```", full_text, re.DOTALL)
-        
-    extracted_lore = None
-    if match:
-        extracted_lore = match.group(1).strip()
-        block_start_idx = full_text.find("```")
-        clean_narrative = full_text[:block_start_idx].strip()
-    else:
-        clean_narrative = full_text
-        if "# CURRENT CONTEXT" in full_text:
-            parts = full_text.split("# CURRENT CONTEXT")
-            clean_narrative = parts[0].strip()
-            extracted_lore = "# CURRENT CONTEXT" + parts[1].strip()
-
-    return clean_narrative, extracted_lore
 
 def main():
     initialize_game()
@@ -85,15 +66,15 @@ def main():
         active_lore = load_file_content(LORE_FILE)
         available_archives = get_archived_files_list()
 
-        # --- PASS 1: AUTONOMOUS MEMORY CHECK ---
+        # --- PASS 1: AUTONOMOUS ARCHIVE READ CHECK ---
         memory_prompt = f"""
         You are the mental logic center of a Game Master. 
         The player wants to do this: "{player_input}"
         
-        Here is your current active summary:
+        Here is your current active summary notes file:
         {active_lore}
 
-        You have these archive files stored on disk: {available_archives}
+        You have these deep-history archive log files stored on disk: {available_archives}
 
         Task: Decide if you need to read the contents of ANY deep archive files to handle the player's input correctly.
         Reply with ONLY the filename (e.g., history_log_1.md) or strictly the word: NONE.
@@ -110,40 +91,78 @@ def main():
                     break
 
             injected_memory = ""
-            if requested_file:
+            if requested_file and requested_file in available_archives:
                 injected_memory = f"\n\n[RETRIEVED DEEP MEMORY FROM ARCHIVE {requested_file}]:\n" + load_file_content(os.path.join(ARCHIVE_DIR, requested_file))
 
-            # --- PASS 2: PURE STORY GENERATION ---
-            system_prompt = (
-                "You are an immersive, open-world Text Adventure Engine.\n\n"
-                "CRITICAL INSTRUCTIONS:\n"
-                "1. Write ONLY the story text describing what happens next. Do not talk to the user out-of-character.\n"
-                "2. DO NOT provide choices, hints, or menu options. Let the story hang open-ended.\n"
-                "3. At the absolute end of your response, you MUST provide the entire updated active text lorebook "
-                "wrapped inside a markdown code block starting with ```markdown. Keep this block strictly at the very end."
+            # =================================================================
+            # PASS 2: THE NARRATOR (Generates pure storytelling first)
+            # =================================================================
+            story_system_prompt = (
+                "You are an immersive, highly description-rich fantasy text adventure narrator.\n"
+                "Your job is to look at the ground truth world notes and output ONLY pure creative story prose "
+                "describing the vivid physical result of the player's action.\n"
+                "Do not display lists, choices, brackets, inventories, notes, or system tags. "
+                "Output nothing but the story narrative."
             )
 
-            user_prompt = f"""
-            ACTIVE LOREBOOK:
+            story_user_prompt = f"""
+            GROUND TRUTH WORLD LOGS:
             {active_lore}
             {injected_memory}
 
-            PLAYER ACTION:
-            {player_input}
+            PLAYER ACTION DETAILED:
+            "{player_input}"
+
+            Task: Describe the narrative outcome beautifully based on the logs. Keep your prose fluid and open-ended.
             """
 
-            response = ollama.generate(model=MODEL_NAME, system=system_prompt, prompt=user_prompt)
-            full_response = response['response']
-
-            story_output, updated_lore = clean_and_extract_story(full_response)
-
-            if updated_lore:
-                write_file_content(LORE_FILE, updated_lore)
+            story_response = ollama.generate(
+                model=MODEL_NAME, 
+                system=story_system_prompt, 
+                prompt=story_user_prompt,
+                options={"temperature": 0.7}
+            )
             
-            if story_output:
-                # Cache the exact narrative block on disk for the next startup cycle
-                write_file_content(LAST_RESPONSE_FILE, story_output)
-                print(f"\n{story_output}")
+            clean_story = story_response['response'].strip()
+
+            # Print your clean narrative right away and cache it for startup
+            print(f"\n{clean_story}")
+            write_file_content(LAST_RESPONSE_FILE, clean_story)
+
+            # =================================================================
+            # PASS 3: THE NOTE-TAKER (Updates files silently AFTER the fact)
+            # =================================================================
+            notes_system_prompt = (
+                "You are an administrative backend tracking log system for a text adventure.\n"
+                "Your task is to take the old world notes, look at what the player did, look at the story text "
+                "that just occurred, and rewrite the entire notes text file to incorporate everything that just happened.\n"
+                "Keep tracking tags like context, location, inventory, and your timeline history up to date.\n"
+                "Output ONLY the plain text notes file structure. Do not tell a story or talk out of character."
+            )
+
+            notes_user_prompt = f"""
+            OLD LOREBOOK NOTES ON DISK:
+            {active_lore}
+
+            WHAT THE PLAYER DID:
+            "{player_input}"
+
+            WHAT ACTUALLY HAPPENED IN RESPONSE (THE STORY):
+            "{clean_story}"
+
+            Task: Rewrite and update the notes file completely to record this turn's events and changes.
+            """
+
+            notes_response = ollama.generate(
+                model=MODEL_NAME, 
+                system=notes_system_prompt, 
+                prompt=notes_user_prompt,
+                options={"temperature": 0.1}  # Low temperature for precise record-keeping
+            )
+            
+            # Instantly overwrite the background file with the fully informed raw logs
+            updated_lore = notes_response['response'].strip()
+            write_file_content(LORE_FILE, updated_lore)
 
         except Exception as e:
             print(f"\n❌ Local Connection Error: {e}")
